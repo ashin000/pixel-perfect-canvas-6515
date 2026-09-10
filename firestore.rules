@@ -1,0 +1,77 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- helpers ----------
+
+    // Approved coordinator/admin accounts (Firebase Email/Password sign-in).
+    function coordinatorEmails() {
+      return [
+        "laptopnodell@gmail.com"
+      ];
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isCoordinator() {
+      return isSignedIn()
+        && request.auth.token.email != null
+        && request.auth.token.email.lower() in coordinatorEmails();
+    }
+
+    function ownsQuiz(data) {
+      return isCoordinator() && data.teacherId == request.auth.uid;
+    }
+
+    // ---------- admins/{uid} ----------
+    // Optional allow-list mirror used by the app to confirm admin access.
+    // Only the signed-in coordinator can read their own record.
+    // Writes are console-only (never from the app).
+    match /admins/{uid} {
+      allow get: if isCoordinator() && request.auth.uid == uid;
+      allow list, create, update, delete: if false;
+    }
+
+    // ---------- quizzes/{quizId} ----------
+    // Coordinators manage their own quizzes.
+    // Participants (unauthenticated) may read only PUBLISHED quizzes,
+    // which is required for joining by quiz code and downloading offline.
+    match /quizzes/{quizId} {
+      allow get, list: if isCoordinator() || resource.data.published == true;
+      allow create: if ownsQuiz(request.resource.data);
+      allow update: if ownsQuiz(resource.data) && ownsQuiz(request.resource.data);
+      allow delete: if ownsQuiz(resource.data);
+    }
+
+    // ---------- attempts/{attemptId} ----------
+    // Submissions are written once by the public submission endpoint, which
+    // re-scores every answer server-side. Clients can never edit or delete a
+    // stored attempt, and can never read other participants' attempts.
+    match /attempts/{attemptId} {
+      allow get, list: if isCoordinator();
+
+      allow create: if request.resource.data.quizId is string
+        && request.resource.data.attemptId is string
+        && request.resource.data.attemptId == attemptId
+        && request.resource.data.roleNumber is string
+        && request.resource.data.roleNumber.size() > 0
+        && request.resource.data.participantName is string
+        && request.resource.data.participantName.size() > 0
+        && exists(/databases/$(database)/documents/quizzes/$(request.resource.data.quizId))
+        && get(/databases/$(database)/documents/quizzes/$(request.resource.data.quizId)).data.published == true;
+
+      // Idempotent re-sync of the same attempt id is allowed only for the
+      // coordinator (re-scoring / corrections). Participants cannot overwrite.
+      allow update: if isCoordinator();
+      allow delete: if isCoordinator();
+    }
+
+    // ---------- everything else ----------
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
